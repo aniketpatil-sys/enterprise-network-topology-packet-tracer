@@ -1,0 +1,595 @@
+================================================================================
+        CISCO PACKET TRACER - FIXED WAN/LAN TOPOLOGY FULL CONFIGURATION
+        1 ISP Router | 1 Edge Router (R1) | 9 Branch Routers (R2-R10) | 10 Switches | 100 PCs | 1 Server
+        OSPFv2 | DHCP | NAT/PAT (edge only) | Default Route propagation
+================================================================================
+================================================================================
+WHAT WAS WRONG - AND WHY
+================================================================================
+PROBLEM 1 - NAT on every router (R1-R10)
+  Each router had "ip nat outside" on Gi0/0 (the 203.0.113.x interface) and
+  "ip nat inside source list 1 interface GigabitEthernet0/0 overload".
+  This means each router tried to NAT its LAN traffic OUT to the shared
+  203.0.113.0/24 segment - which is an internal segment, not the internet.
+  NAT must only happen at the TRUE edge: the single router that faces the ISP.
+  FIX: Remove NAT from R2-R10. Only R1 does NAT, using its ISP-facing
+  interface (Gi0/2) as the outside interface.
+PROBLEM 2 - No ISP router
+  203.0.113.0/24 was the "WAN" but had no upstream gateway. Every router's
+  default route pointed nowhere, so internet traffic was black-holed.
+  FIX: Add an ISP router. R1 connects to ISP via a new /30 link.
+  ISP simulates the internet (loopback 8.8.8.8 = DNS, loopback 1.1.1.1).
+PROBLEM 3 - No default route
+  No router had "ip route 0.0.0.0 0.0.0.0 <next-hop>" and no OSPF
+  "default-information originate" was configured. Without this, no router
+  knows how to forward internet-bound packets.
+  FIX: R1 gets a static default route toward ISP, then injects it into OSPF
+  with "default-information originate" so all other routers learn it.
+PROBLEM 4 - All routers in the same OSPF flat area with NAT confusion
+  When all 10 routers are in the same /24 and each does NAT, OSPF adjacency
+  forms fine (they're all on the same segment) but NAT translation tables
+  conflict and the "outside" interface is the same shared network - so
+  translated packets loop or get dropped.
+  FIX: Internal routers (R2-R10) drop NAT entirely. They route privately
+  via OSPF. Only R1 translates all RFC-1918 subnets to the single public IP.
+================================================================================
+REDESIGNED TOPOLOGY
+================================================================================
+  [WAN / INTERNET CLOUD]
+       |
+   ISP Router (Gi0/0: 10.0.0.1/30)
+       |  10.0.0.0/30 uplink
+   R1  (Gi0/2: 10.0.0.2/30)  <-- EDGE ROUTER: NAT here only
+       |
+   R1  (Gi0/0: 203.0.113.1/24) <-- Internal WAN segment
+       |
+   [WAN-SW]  (Cisco 2960)
+   / | | | | | | | | \
+  R2 R3 R4 R5 R6 R7 R8 R9 R10  (203.0.113.2-10)
+  |  |  |  |  |  |  |  |  |
+ SW2 SW3 ...                SW10
+  |                          |
+PCs + Server-A           PCs Only
+IP ADDRESS PLAN:
+  ISP uplink     : 10.0.0.0/30    (R1 Gi0/2=10.0.0.2, ISP Gi0/0=10.0.0.1)
+  Internal WAN   : 203.0.113.0/24 (R1-R10 Gi0/0 addresses)
+  LAN1-LAN10     : 192.168.1.0/24 to 192.168.10.0/24
+  ISP loopbacks  : 8.8.8.8/32 (DNS sim), 1.1.1.1/32 (internet sim)
+NAT POOL: R1 NATs ALL 192.168.0.0/16 to its public IP 10.0.0.2 (PAT/overload)
+================================================================================
+CABLING CHANGES (add these connections in Packet Tracer)
+================================================================================
+NEW connections to add:
+  WAN Cloud Ethernet Port <------> ISP Gi0/1   (Copper Straight-Through)
+  R1   Gi0/2              <------> ISP Gi0/0   (Copper Straight-Through or Serial DCE)
+  ISP  Gi0/1 is used only for WAN Cloud visual connectivity
+  ISP  Loopback0          -------> 8.8.8.8     (configured in software, no cable)
+  ISP  Loopback1          -------> 1.1.1.1     (configured in software, no cable)
+Existing connections remain unchanged:
+  R1-R10 Gi0/0  <--> WAN-SW Fa0/1-10
+  R1-R10 Gi0/1  <--> SW1-SW10
+  All PCs and Server-A remain on their LANs
+
+================================================================================
+WAN CLOUD CONFIGURATION (OPTIONAL VISUAL DEVICE)
+================================================================================
+Device    : Cloud-PT
+Label     : WAN / INTERNET CLOUD
+Purpose   : Visual representation of external ISP/WAN network
+
+Connection:
+  Cloud Ethernet Port  <------>  ISP GigabitEthernet0/1
+  Cable Type           : Copper Straight-Through
+
+Note:
+  The WAN Cloud is optional and mainly used for clean topology presentation.
+  Internet simulation is still done using ISP loopbacks:
+    8.8.8.8/32  on ISP Loopback0
+    1.1.1.1/32  on ISP Loopback1
+
+If the Cloud-to-ISP link is red:
+  1. Use Copper Straight-Through cable
+  2. Enable ISP Gi0/1 using no shutdown
+  3. Wait a few seconds for the link to turn green
+================================================================================
+
+================================================================================
+ISP ROUTER CONFIGURATION  (new device - add a Cisco 2911 named "ISP")
+================================================================================
+enable
+configure terminal
+hostname ISP
+! Uplink to R1 (edge router)
+interface GigabitEthernet0/0
+description Uplink to R1 Gi0/2
+ip address 10.0.0.1 255.255.255.252
+no shutdown
+exit
+! Optional WAN Cloud visual link
+interface GigabitEthernet0/1
+description Link to WAN / Internet Cloud
+no shutdown
+exit
+! Loopback - simulates 8.8.8.8 DNS / internet destination
+interface Loopback0
+description Simulated Internet - DNS 8.8.8.8
+ip address 8.8.8.8 255.255.255.255
+exit
+! Loopback - simulates 1.1.1.1 (Cloudflare DNS / general internet)
+interface Loopback1
+description Simulated Internet - 1.1.1.1
+ip address 1.1.1.1 255.255.255.255
+exit
+! Static route back to R1's NAT pool (10.0.0.2 is R1's public IP)
+! This allows return traffic from "internet" to reach translated addresses.
+! In a real ISP, routing is handled by BGP - here we use a static host route.
+ip route 10.0.0.2 255.255.255.255 10.0.0.2
+! Optional: allow pings FROM ISP loopbacks to work (no access-list needed here)
+end
+write memory
+================================================================================
+ROUTER R1 CONFIGURATION  (EDGE ROUTER - NAT + Default Route + OSPF)
+================================================================================
+enable
+configure terminal
+hostname R1
+! === ISP-Facing Interface (PUBLIC / OUTSIDE for NAT) ===
+interface GigabitEthernet0/2
+description Uplink to ISP
+ip address 10.0.0.2 255.255.255.252
+ip nat outside
+no shutdown
+exit
+! === Internal WAN Interface (connects to WAN-SW and other routers) ===
+interface GigabitEthernet0/0
+description WAN Link to WAN-SW (Internal)
+ip address 203.0.113.1 255.255.255.0
+ip nat inside
+no shutdown
+exit
+! === LAN1 Interface ===
+interface GigabitEthernet0/1
+description LAN1 Link to SW1
+ip address 192.168.1.1 255.255.255.0
+ip nat inside
+no shutdown
+exit
+! === DHCP Pool for LAN1 ===
+ip dhcp excluded-address 192.168.1.1 192.168.1.10
+ip dhcp pool LAN1_POOL
+network 192.168.1.0 255.255.255.0
+default-router 192.168.1.1
+dns-server 8.8.8.8
+lease 7
+exit
+! === OSPF - advertise WAN segment and LAN, inject default route to all peers ===
+router ospf 1
+router-id 1.1.1.1
+network 203.0.113.0 0.0.0.255 area 0
+network 192.168.1.0 0.0.0.255 area 0
+network 10.0.0.0 0.0.0.3 area 0
+! KEY FIX: inject default route so R2-R10 know to send internet traffic to R1
+! NOTE: Packet Tracer IOS may not support the "always" keyword, so use:
+default-information originate
+exit
+! === Default Route toward ISP ===
+! KEY FIX: without this, nothing reaches the internet
+ip route 0.0.0.0 0.0.0.0 10.0.0.1
+! === NAT/PAT - translate ALL private LANs (192.168.0.0/16) to R1's public IP ===
+! KEY FIX: ACL covers all 10 LANs so any branch traffic gets NATted at R1
+ip access-list standard NAT_TRAFFIC
+permit 192.168.0.0 0.0.255.255
+exit
+! Overload (PAT) on the ISP-facing interface
+ip nat inside source list NAT_TRAFFIC interface GigabitEthernet0/2 overload
+end
+write memory
+================================================================================
+ROUTER R2 CONFIGURATION  (Internal - no NAT, no default route config needed)
+================================================================================
+enable
+configure terminal
+hostname R2
+! WAN Interface (internal - ip nat commands REMOVED)
+interface GigabitEthernet0/0
+description WAN Link to WAN-SW
+ip address 203.0.113.2 255.255.255.0
+no shutdown
+exit
+! LAN Interface
+interface GigabitEthernet0/1
+description LAN2 Link to SW2
+ip address 192.168.2.1 255.255.255.0
+no shutdown
+exit
+! DHCP Pool
+ip dhcp excluded-address 192.168.2.1 192.168.2.10
+ip dhcp pool LAN2_POOL
+network 192.168.2.0 255.255.255.0
+default-router 192.168.2.1
+dns-server 8.8.8.8
+lease 7
+exit
+! OSPF - R1 will inject default route via "default-information originate"
+router ospf 1
+router-id 2.2.2.2
+network 203.0.113.0 0.0.0.255 area 0
+network 192.168.2.0 0.0.0.255 area 0
+exit
+! NO NAT here - R1 handles all NAT for the entire 192.168.0.0/16 space
+end
+write memory
+================================================================================
+ROUTER R3 CONFIGURATION  (Internal - no NAT)
+================================================================================
+enable
+configure terminal
+hostname R3
+interface GigabitEthernet0/0
+description WAN Link to WAN-SW
+ip address 203.0.113.3 255.255.255.0
+no shutdown
+exit
+interface GigabitEthernet0/1
+description LAN3 Link to SW3
+ip address 192.168.3.1 255.255.255.0
+no shutdown
+exit
+ip dhcp excluded-address 192.168.3.1 192.168.3.10
+ip dhcp pool LAN3_POOL
+network 192.168.3.0 255.255.255.0
+default-router 192.168.3.1
+dns-server 8.8.8.8
+lease 7
+exit
+router ospf 1
+router-id 3.3.3.3
+network 203.0.113.0 0.0.0.255 area 0
+network 192.168.3.0 0.0.0.255 area 0
+exit
+end
+write memory
+================================================================================
+ROUTER R4 CONFIGURATION  (Internal - no NAT)
+================================================================================
+enable
+configure terminal
+hostname R4
+interface GigabitEthernet0/0
+description WAN Link to WAN-SW
+ip address 203.0.113.4 255.255.255.0
+no shutdown
+exit
+interface GigabitEthernet0/1
+description LAN4 Link to SW4
+ip address 192.168.4.1 255.255.255.0
+no shutdown
+exit
+ip dhcp excluded-address 192.168.4.1 192.168.4.10
+ip dhcp pool LAN4_POOL
+network 192.168.4.0 255.255.255.0
+default-router 192.168.4.1
+dns-server 8.8.8.8
+lease 7
+exit
+router ospf 1
+router-id 4.4.4.4
+network 203.0.113.0 0.0.0.255 area 0
+network 192.168.4.0 0.0.0.255 area 0
+exit
+end
+write memory
+================================================================================
+ROUTER R5 CONFIGURATION  (Internal - no NAT)
+================================================================================
+enable
+configure terminal
+hostname R5
+interface GigabitEthernet0/0
+description WAN Link to WAN-SW
+ip address 203.0.113.5 255.255.255.0
+no shutdown
+exit
+interface GigabitEthernet0/1
+description LAN5 Link to SW5
+ip address 192.168.5.1 255.255.255.0
+no shutdown
+exit
+ip dhcp excluded-address 192.168.5.1 192.168.5.10
+ip dhcp pool LAN5_POOL
+network 192.168.5.0 255.255.255.0
+default-router 192.168.5.1
+dns-server 8.8.8.8
+lease 7
+exit
+router ospf 1
+router-id 5.5.5.5
+network 203.0.113.0 0.0.0.255 area 0
+network 192.168.5.0 0.0.0.255 area 0
+exit
+end
+write memory
+================================================================================
+ROUTER R6 CONFIGURATION  (Internal - no NAT)
+================================================================================
+enable
+configure terminal
+hostname R6
+interface GigabitEthernet0/0
+description WAN Link to WAN-SW
+ip address 203.0.113.6 255.255.255.0
+no shutdown
+exit
+interface GigabitEthernet0/1
+description LAN6 Link to SW6
+ip address 192.168.6.1 255.255.255.0
+no shutdown
+exit
+ip dhcp excluded-address 192.168.6.1 192.168.6.10
+ip dhcp pool LAN6_POOL
+network 192.168.6.0 255.255.255.0
+default-router 192.168.6.1
+dns-server 8.8.8.8
+lease 7
+exit
+router ospf 1
+router-id 6.6.6.6
+network 203.0.113.0 0.0.0.255 area 0
+network 192.168.6.0 0.0.0.255 area 0
+exit
+end
+write memory
+================================================================================
+ROUTER R7 CONFIGURATION  (Internal - no NAT)
+================================================================================
+enable
+configure terminal
+hostname R7
+interface GigabitEthernet0/0
+description WAN Link to WAN-SW
+ip address 203.0.113.7 255.255.255.0
+no shutdown
+exit
+interface GigabitEthernet0/1
+description LAN7 Link to SW7
+ip address 192.168.7.1 255.255.255.0
+no shutdown
+exit
+ip dhcp excluded-address 192.168.7.1 192.168.7.10
+ip dhcp pool LAN7_POOL
+network 192.168.7.0 255.255.255.0
+default-router 192.168.7.1
+dns-server 8.8.8.8
+lease 7
+exit
+router ospf 1
+router-id 7.7.7.7
+network 203.0.113.0 0.0.0.255 area 0
+network 192.168.7.0 0.0.0.255 area 0
+exit
+end
+write memory
+================================================================================
+ROUTER R8 CONFIGURATION  (Internal - no NAT)
+================================================================================
+enable
+configure terminal
+hostname R8
+interface GigabitEthernet0/0
+description WAN Link to WAN-SW
+ip address 203.0.113.8 255.255.255.0
+no shutdown
+exit
+interface GigabitEthernet0/1
+description LAN8 Link to SW8
+ip address 192.168.8.1 255.255.255.0
+no shutdown
+exit
+ip dhcp excluded-address 192.168.8.1 192.168.8.10
+ip dhcp pool LAN8_POOL
+network 192.168.8.0 255.255.255.0
+default-router 192.168.8.1
+dns-server 8.8.8.8
+lease 7
+exit
+router ospf 1
+router-id 8.8.8.8
+network 203.0.113.0 0.0.0.255 area 0
+network 192.168.8.0 0.0.0.255 area 0
+exit
+end
+write memory
+================================================================================
+ROUTER R9 CONFIGURATION  (Internal - no NAT)
+================================================================================
+enable
+configure terminal
+hostname R9
+interface GigabitEthernet0/0
+description WAN Link to WAN-SW
+ip address 203.0.113.9 255.255.255.0
+no shutdown
+exit
+interface GigabitEthernet0/1
+description LAN9 Link to SW9
+ip address 192.168.9.1 255.255.255.0
+no shutdown
+exit
+ip dhcp excluded-address 192.168.9.1 192.168.9.10
+ip dhcp pool LAN9_POOL
+network 192.168.9.0 255.255.255.0
+default-router 192.168.9.1
+dns-server 8.8.8.8
+lease 7
+exit
+router ospf 1
+router-id 9.9.9.9
+network 203.0.113.0 0.0.0.255 area 0
+network 192.168.9.0 0.0.0.255 area 0
+exit
+end
+write memory
+================================================================================
+ROUTER R10 CONFIGURATION  (Internal - no NAT)
+================================================================================
+enable
+configure terminal
+hostname R10
+interface GigabitEthernet0/0
+description WAN Link to WAN-SW
+ip address 203.0.113.10 255.255.255.0
+no shutdown
+exit
+interface GigabitEthernet0/1
+description LAN10 Link to SW10
+ip address 192.168.10.1 255.255.255.0
+no shutdown
+exit
+ip dhcp excluded-address 192.168.10.1 192.168.10.10
+ip dhcp pool LAN10_POOL
+network 192.168.10.0 255.255.255.0
+default-router 192.168.10.1
+dns-server 8.8.8.8
+lease 7
+exit
+router ospf 1
+router-id 10.10.10.10
+network 203.0.113.0 0.0.0.255 area 0
+network 192.168.10.0 0.0.0.255 area 0
+exit
+end
+write memory
+================================================================================
+SINGLE MAIL SERVER CONFIGURATION - SERVER-A ONLY
+================================================================================
+Device    : Server-A (ServerPT)
+Location  : LAN1 - Connected to SW1
+  IP Address   : 192.168.1.10
+  Subnet Mask  : 255.255.255.0
+  Default GW   : 192.168.1.1
+  DNS Server   : 8.8.8.8
+Email Service Setup:
+  SMTP: ON | POP3: ON
+  Domain Name  : ccna.com
+Users:
+  userA1  Password: cisco123   (PC0)
+  userA2  Password: cisco123   (PC55)
+  userA3  Password: cisco123   (PC95)
+  userA4  Password: cisco123   (PC76)
+
+================================================================================
+PC DHCP CONFIGURATION (unchanged - set all 100 PCs to DHCP)
+================================================================================
+  LAN1  : PC0-PC9    --> 192.168.1.11  to 192.168.1.254
+  LAN2  : PC10-PC19  --> 192.168.2.11  to 192.168.2.254
+  LAN3  : PC20-PC29  --> 192.168.3.11  to 192.168.3.254
+  LAN4  : PC30-PC39  --> 192.168.4.11  to 192.168.4.254
+  LAN5  : PC40-PC49  --> 192.168.5.11  to 192.168.5.254
+  LAN6  : PC50-PC59  --> 192.168.6.11  to 192.168.6.254
+  LAN7  : PC60-PC69  --> 192.168.7.11  to 192.168.7.254
+  LAN8  : PC70-PC79  --> 192.168.8.11  to 192.168.8.254
+  LAN9  : PC80-PC89  --> 192.168.9.11  to 192.168.9.254
+  LAN10 : PC90-PC99  --> 192.168.10.11 to 192.168.10.254
+================================================================================
+EMAIL CLIENT USER MAPPING
+================================================================================
+All email users use the single mail server Server-A.
+Incoming Mail Server : 192.168.1.10
+Outgoing Mail Server : 192.168.1.10
+Domain Name          : ccna.com
+Password             : cisco123
+
+PC0  -> userA1@ccna.com  Username: userA1
+PC55 -> userA2@ccna.com  Username: userA2
+PC95 -> userA3@ccna.com  Username: userA3
+PC76 -> userA4@ccna.com  Username: userA4
+
+================================================================================
+VERIFICATION COMMANDS
+================================================================================
+! On R1 - verify default route and NAT
+show ip route
+  ! Must show: S*    0.0.0.0/0 [1/0] via 10.0.0.1
+show ip route ospf
+  ! Must show all 192.168.x.0/24 networks from R2-R10
+show ip nat translations
+  ! After PC pings to 8.8.8.8, entries appear here
+show ip nat statistics
+! On R2-R10 - verify they learned the OSPF default route
+show ip route
+  ! Must show: O*E2  0.0.0.0/0 [110/1] via 203.0.113.1
+  ! This means R2 knows to send internet traffic to R1
+! On ISP - verify it can respond to pings
+show ip interface brief
+ping 10.0.0.2   ! should reach R1's public IP
+! On any router - check OSPF neighbors
+show ip ospf neighbor
+  ! R1 should see 9 neighbors (R2-R10)
+  ! R2-R10 should each see R1 + 8 others = 9 neighbors
+! On any router
+show ip interface brief
+show ip dhcp binding
+show ip ospf
+================================================================================
+PING TEST PLAN (in order - verify layer by layer)
+================================================================================
+STEP 1 - Test ISP uplink from R1:
+  R1# ping 10.0.0.1              --> ISP Gi0/0      MUST succeed
+  R1# ping 8.8.8.8               --> ISP Loopback0  MUST succeed
+STEP 2 - Test inter-router WAN segment:
+  R1# ping 203.0.113.2           --> R2 WAN IP      MUST succeed
+  R2# ping 203.0.113.1           --> R1 WAN IP      MUST succeed
+STEP 3 - Test OSPF-learned routes:
+  R1# ping 192.168.2.1           --> R2 LAN gateway MUST succeed (via OSPF)
+  R10# ping 192.168.1.1          --> R1 LAN gateway MUST succeed
+STEP 4 - Test default route propagation:
+  R2# ping 8.8.8.8               --> via R1 then ISP MUST succeed
+  R10# ping 8.8.8.8              --> MUST succeed
+STEP 5 - Test PC inter-LAN and internet:
+  PC0  ping 192.168.1.1          --> Local gateway  MUST succeed
+  PC0  ping 192.168.10.11        --> Remote PC LAN10 MUST succeed
+  PC0  ping 8.8.8.8              --> Internet (via NAT on R1) MUST succeed
+  PC90 ping 192.168.1.11         --> Remote PC LAN1  MUST succeed
+  PC90 ping 8.8.8.8              --> Internet        MUST succeed
+STEP 6 - Verify NAT is working:
+  R1# show ip nat translations
+  ! After step 5 pings, you should see entries like:
+  !  Pro Inside global     Inside local       Outside local  Outside global
+  !  icmp 10.0.0.2:1234    192.168.1.11:1234  8.8.8.8:1234   8.8.8.8:1234
+================================================================================
+QUICK REFERENCE TABLE (UPDATED)
+================================================================================
+Device | Role         | Interface | IP Address      | Notes
+-------|--------------|-----------|-----------------|------------------------
+ISP    | ISP Router   | Gi0/0     | 10.0.0.1/30     | Uplink to R1
+ISP    |              | Lo0       | 8.8.8.8/32      | Simulated DNS/Internet
+ISP    |              | Lo1       | 1.1.1.1/32      | Simulated Internet
+R1     | EDGE Router  | Gi0/2     | 10.0.0.2/30     | NAT outside (ISP link)
+R1     |              | Gi0/0     | 203.0.113.1/24  | NAT inside (WAN seg)
+R1     |              | Gi0/1     | 192.168.1.1/24  | NAT inside (LAN1 GW)
+R2     | Branch       | Gi0/0     | 203.0.113.2/24  | Internal WAN
+R2     |              | Gi0/1     | 192.168.2.1/24  | LAN2 Gateway
+R3     | Branch       | Gi0/0     | 203.0.113.3/24  |
+R3     |              | Gi0/1     | 192.168.3.1/24  |
+R4-R9  | Branch       | ...       | (same pattern)  |
+R10    | Branch       | Gi0/0     | 203.0.113.10/24 |
+R10    |              | Gi0/1     | 192.168.10.1/24 | LAN10 Gateway
+Srv-A  | Email Server | --        | 192.168.1.10/24 | Static, LAN1
+================================================================================
+SUCCESS CRITERIA CHECKLIST
+================================================================================
+[ ] ISP router pingable from R1 (ping 10.0.0.1 from R1)
+[ ] R1 routing table has static default: S* 0.0.0.0/0 via 10.0.0.1
+[ ] R2-R10 routing tables have OSPF default: O*E2 0.0.0.0/0 via 203.0.113.1
+[ ] R1 shows 9 OSPF neighbors (show ip ospf neighbor)
+[ ] All 10 LAN networks in OSPF table on all routers
+[ ] All 100 PCs receive IP via DHCP
+[ ] PC0 can ping PC90 (192.168.10.11)
+[ ] PC0 can ping 8.8.8.8 (internet via NAT)
+[ ] R1 shows NAT translations after PC pings (show ip nat translations)
+[ ] NAT translations NOT present on R2-R10 (they have no NAT config)
+[ ] Email works between all users via Single Mail Server (Server-A)
+[ ] All interfaces up/up (show ip interface brief on all routers)
+================================================================================
+END OF FIXED CONFIGURATION FILE
+================================================================================
